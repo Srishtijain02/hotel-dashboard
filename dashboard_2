@@ -1,0 +1,282 @@
+# Hotel Booking Demand — Managerial Decision Dashboard
+# Python for Managers | IIM Rohtak
+# Dataset: https://www.kaggle.com/datasets/jessemostipak/hotel-booking-demand
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+
+st.set_page_config(page_title="Hotel Demand Command Centre", page_icon="🏨", layout="wide")
+
+COLORS = {
+    "navy": "#17324D", "blue": "#2878B5", "teal": "#19A89D",
+    "gold": "#F2B134", "coral": "#E76F51", "cream": "#F7F4ED"
+}
+MONTHS = ["January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December"]
+
+st.markdown("""
+<style>
+.stApp {background: #F7F9FC;}
+.block-container {padding-top: 1.4rem; padding-bottom: 3rem;}
+.hero {padding: 1.5rem 1.7rem; border-radius: 18px; color: white;
+       background: linear-gradient(120deg,#17324D,#2878B5); margin-bottom: 1rem;}
+.hero h1 {margin:0; font-size:2rem}.hero p {margin:.4rem 0 0; opacity:.86}
+[data-testid="stMetric"] {background:white; border:1px solid #E5EAF0;
+ border-radius:14px; padding:14px; box-shadow:0 6px 18px rgba(23,50,77,.06)}
+.manager-box {background:#EAF7F5; border-left:5px solid #19A89D;
+ padding:1rem 1.2rem; border-radius:10px; margin:.5rem 0 1rem;}
+.small-note {color:#5F6B78; font-size:.86rem;}
+</style>
+""", unsafe_allow_html=True)
+
+@st.cache_data(show_spinner=False)
+def prepare_data(file_bytes=None):
+    source = file_bytes if file_bytes is not None else Path("hotel_bookings.csv")
+    df = pd.read_csv(source)
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Missing-value treatment is explicit and reproducible.
+    df["children"] = pd.to_numeric(df["children"], errors="coerce").fillna(0)
+    for col in ["country", "agent", "company"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("Unknown").astype(str)
+
+    numeric = ["adults", "babies", "lead_time", "adr", "stays_in_weekend_nights",
+               "stays_in_week_nights", "is_canceled"]
+    for col in numeric:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["hotel", "arrival_date_year", "arrival_date_month", "adr", "is_canceled"])
+
+    # Keep duplicates as required by the supplied KPI specification.
+    df = df[(df["adults"] + df["children"] + df["babies"] > 0) & (df["adr"] >= 0)].copy()
+    month_number = df["arrival_date_month"].map({m: i + 1 for i, m in enumerate(MONTHS)})
+    df["arrival_date"] = pd.to_datetime(dict(
+        year=df["arrival_date_year"].astype(int), month=month_number,
+        day=df["arrival_date_day_of_month"].astype(int)), errors="coerce")
+    df = df.dropna(subset=["arrival_date"])
+
+    # Features make the business meaning transparent.
+    df["total_nights"] = df["stays_in_weekend_nights"] + df["stays_in_week_nights"]
+    df["guests"] = df["adults"] + df["children"] + df["babies"]
+    df["booking_value"] = df["adr"] * df["total_nights"]
+    df["realised_revenue"] = np.where(df["is_canceled"].eq(0), df["booking_value"], 0)
+    df["booking_status"] = np.where(df["is_canceled"].eq(1), "Cancelled", "Completed")
+    df["month"] = pd.Categorical(df["arrival_date_month"], MONTHS, ordered=True)
+    df["lead_time_band"] = pd.cut(df["lead_time"],
+        bins=[-1, 7, 30, 90, 180, np.inf],
+        labels=["0–7 days", "8–30 days", "31–90 days", "91–180 days", "181+ days"])
+    return df
+
+st.markdown("""<div class="hero"><h1>Hotel Demand Command Centre</h1>
+<p>Turn booking behaviour into fewer cancellations, stronger pricing and more reliable revenue.</p></div>""",
+unsafe_allow_html=True)
+
+with st.sidebar:
+    st.header("Control panel")
+    upload = st.file_uploader("Upload hotel_bookings.csv", type="csv")
+    st.caption("If omitted, the app reads hotel_bookings.csv from this folder.")
+
+try:
+    data = prepare_data(upload.getvalue() if upload else None)
+except FileNotFoundError:
+    st.info("Place hotel_bookings.csv beside this script, or upload it from the sidebar.")
+    st.stop()
+except Exception as exc:
+    st.error("The file could not be prepared. Confirm that it is the original Kaggle hotel_bookings.csv file.")
+    st.exception(exc)
+    st.stop()
+
+with st.sidebar:
+    st.divider()
+    min_date, max_date = data["arrival_date"].min().date(), data["arrival_date"].max().date()
+    dates = st.date_input("Arrival period", (min_date, max_date), min_value=min_date, max_value=max_date)
+    hotel = st.multiselect("Hotel", sorted(data["hotel"].unique()), default=sorted(data["hotel"].unique()))
+    segment = st.multiselect("Market segment", sorted(data["market_segment"].unique()),
+                             default=sorted(data["market_segment"].unique()))
+    channel = st.multiselect("Distribution channel", sorted(data["distribution_channel"].unique()),
+                             default=sorted(data["distribution_channel"].unique()))
+    customer = st.multiselect("Customer type", sorted(data["customer_type"].unique()),
+                              default=sorted(data["customer_type"].unique()))
+    st.divider()
+    st.caption("All KPIs, charts and recommendations respond to these filters.")
+
+start, end = (dates if isinstance(dates, (tuple, list)) and len(dates) == 2 else (min_date, max_date))
+df = data[
+    data["arrival_date"].dt.date.between(start, end)
+    & data["hotel"].isin(hotel)
+    & data["market_segment"].isin(segment)
+    & data["distribution_channel"].isin(channel)
+    & data["customer_type"].isin(customer)
+].copy()
+
+if df.empty:
+    st.warning("No bookings match this combination. Widen one or more filters.")
+    st.stop()
+
+# Eight KPIs: demand/reliability first, value/revenue second.
+total_bookings = len(df)
+completed = int((df["is_canceled"] == 0).sum())
+cancel_rate = df["is_canceled"].mean()
+mean_lead = df["lead_time"].mean()
+avg_stay = df["total_nights"].mean()
+adr = df["adr"].mean()
+revenue = df["realised_revenue"].sum()
+revenue_per_booking = revenue / total_bookings if total_bookings else 0
+
+st.subheader("Executive pulse")
+r1 = st.columns(4)
+r1[0].metric("Total bookings", f"{total_bookings:,.0f}", help="Demand received in the selected period")
+r1[1].metric("Completed bookings", f"{completed:,.0f}", help="Bookings not cancelled")
+r1[2].metric("Cancellation rate", f"{cancel_rate:.1%}", help="Cancelled bookings ÷ total bookings")
+r1[3].metric("Mean lead time", f"{mean_lead:,.0f} days", help="Advance warning available to management")
+r2 = st.columns(4)
+r2[0].metric("Realised room revenue", f"€{revenue/1_000_000:.2f}M", help="ADR × nights for non-cancelled bookings")
+r2[1].metric("Average daily rate", f"€{adr:,.2f}", help="Average listed room rate")
+r2[2].metric("Revenue per booking", f"€{revenue_per_booking:,.2f}", help="Realised revenue ÷ all bookings")
+r2[3].metric("Average stay", f"{avg_stay:.1f} nights", help="Weekend plus weekday nights")
+
+st.caption("Revenue is an estimate because the source has ADR and stay length, but no audited transaction value. Duplicates are retained per the supplied specification.")
+
+monthly = (df.groupby(df["arrival_date"].dt.to_period("M"), observed=True)
+           .agg(Bookings=("hotel", "size"), Cancellations=("is_canceled", "sum"),
+                ADR=("adr", "mean"), Revenue=("realised_revenue", "sum")).reset_index())
+monthly["Month"] = monthly["arrival_date"].astype(str)
+trend_long = monthly.melt(id_vars="Month", value_vars=["Bookings", "Cancellations"],
+                          var_name="Status", value_name="Count")
+fig1 = px.line(trend_long, x="Month", y="Count", color="Status", markers=True,
+               color_discrete_map={"Bookings": COLORS["blue"], "Cancellations": COLORS["coral"]},
+               title="1. Demand and cancellations over time")
+
+hotel_summary = (df.groupby("hotel").agg(Bookings=("hotel", "size"),
+                   Cancellation_rate=("is_canceled", "mean")).reset_index())
+fig2 = px.bar(hotel_summary, x="hotel", y="Cancellation_rate", color="hotel", text_auto=".1%",
+              color_discrete_sequence=[COLORS["blue"], COLORS["teal"]],
+              title="2. Where cancellation risk concentrates")
+fig2.update_yaxes(tickformat=".0%")
+
+segment_summary = (df.groupby("market_segment").agg(Bookings=("hotel", "size"),
+                     Cancellation_rate=("is_canceled", "mean"), ADR=("adr", "mean"),
+                     Revenue=("realised_revenue", "sum")).reset_index())
+segment_summary = segment_summary.sort_values("Bookings", ascending=False)
+fig3 = px.bar(segment_summary, x="market_segment", y="Cancellation_rate", color="Bookings",
+              color_continuous_scale=[COLORS["gold"], COLORS["coral"], COLORS["navy"]],
+              title="3. Which market segments create the problem")
+fig3.update_yaxes(tickformat=".0%")
+
+lead_summary = (df.groupby("lead_time_band", observed=True).agg(Bookings=("hotel", "size"),
+                Cancellation_rate=("is_canceled", "mean")).reset_index())
+fig4 = px.bar(lead_summary, x="lead_time_band", y="Cancellation_rate", color="Bookings",
+              color_continuous_scale="Tealgrn", title="4. Lead time as an early-warning signal")
+fig4.update_yaxes(tickformat=".0%")
+
+fig5 = px.scatter(segment_summary, x="Bookings", y="Cancellation_rate", size="Revenue", color="ADR",
+                  hover_name="market_segment", size_max=55, color_continuous_scale="Viridis",
+                  title="5. Segment opportunity: volume, risk and value")
+fig5.update_yaxes(tickformat=".0%")
+
+deposit = (df.groupby("deposit_type").agg(Bookings=("hotel", "size"),
+           Cancellation_rate=("is_canceled", "mean")).reset_index())
+deposit["Share of bookings"] = deposit["Bookings"] / deposit["Bookings"].sum()
+deposit = deposit.sort_values("Bookings", ascending=False).reset_index(drop=True)
+non_refund_rate = deposit.loc[deposit["deposit_type"].eq("Non Refund"), "Cancellation_rate"]
+nr_share = deposit.loc[deposit["deposit_type"].eq("Non Refund"), "Share of bookings"]
+nr_note = (f"~{non_refund_rate.iloc[0]:.0%} of Non Refund bookings cancel — a documented "
+          f"dataset anomaly (only {nr_share.iloc[0]:.1%} of bookings), not a pricing signal.")
+fig6 = px.bar(deposit, x="deposit_type", y="Cancellation_rate", color="deposit_type",
+              text_auto=".1%", color_discrete_sequence=[COLORS["teal"], COLORS["gold"], COLORS["coral"]],
+              hover_data={"Share of bookings": ":.1%", "Bookings": ":,.0f"},
+              title="6. Deposit policy: a controllable lever (volume shown in hover)")
+fig6.update_yaxes(tickformat=".0%")
+if not non_refund_rate.empty:
+    fig6.add_annotation(x="Non Refund", y=non_refund_rate.iloc[0], text=nr_note,
+                        showarrow=True, arrowhead=2, ay=-90, font=dict(size=10, color=COLORS["coral"]),
+                        bgcolor="white", bordercolor=COLORS["coral"])
+
+country = (df[df["country"] != "Unknown"].groupby("country")
+           .agg(Bookings=("hotel", "size"), Cancellation_rate=("is_canceled", "mean"),
+                Revenue=("realised_revenue", "sum")).reset_index())
+fig7 = px.choropleth(country, locations="country", color="Bookings", hover_name="country",
+                    hover_data={"Cancellation_rate": ":.1%", "Revenue": ":,.0f"},
+                    color_continuous_scale="Blues", title="7. Geographic demand concentration")
+
+fig8 = make_subplots(specs=[[{"secondary_y": True}]])
+fig8.add_trace(go.Bar(x=monthly["Month"], y=monthly["Bookings"], name="Bookings",
+                     marker_color=COLORS["blue"]), secondary_y=False)
+fig8.add_trace(go.Scatter(x=monthly["Month"], y=monthly["ADR"], name="ADR", mode="lines+markers",
+                         line=dict(color=COLORS["gold"], width=3)), secondary_y=True)
+fig8.update_layout(title="8. Pricing context: demand versus ADR", hovermode="x unified")
+fig8.update_yaxes(title_text="Bookings", secondary_y=False)
+fig8.update_yaxes(title_text="ADR (€)", secondary_y=True)
+
+for fig in [fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8]:
+    fig.update_layout(template="plotly_white", height=430, margin=dict(l=25, r=20, t=65, b=30),
+                      legend_title_text="", font=dict(family="Arial", color=COLORS["navy"]))
+
+st.subheader("Decision story")
+charts = [(fig1, "Track demand volatility and the size of avoidable loss."),
+          (fig2, "Assign accountability to the hotel with the greater reliability gap."),
+          (fig3, "Target intervention where cancellation risk and booking volume overlap."),
+          (fig4, "Trigger reminders or deposits before high-risk bookings cancel."),
+          (fig5, "Protect valuable segments instead of applying one blanket policy."),
+          (fig6, "Treat No Deposit as the real lever; Non Refund's ~99% rate is a known data anomaly, not a pricing rule."),
+          (fig7, "Concentrate campaigns and local partnerships in priority markets."),
+          (fig8, "Check whether pricing rises with demand or leaves money on the table.")]
+for i in range(0, 8, 2):
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(charts[i][0], use_container_width=True)
+        st.caption("Managerial use: " + charts[i][1])
+    with right:
+        st.plotly_chart(charts[i + 1][0], use_container_width=True)
+        st.caption("Managerial use: " + charts[i + 1][1])
+
+st.subheader("What-if decision lab")
+scenario_left, scenario_right = st.columns([1, 1.35])
+with scenario_left:
+    reduction = st.slider("Target cancellation-rate reduction", 0.0, 15.0, 5.0, 0.5,
+                          help="Percentage-point reduction, not a relative percentage")
+    adr_change = st.slider("Planned ADR change", -10.0, 20.0, 3.0, 0.5)
+with scenario_right:
+    rescued = min(int(total_bookings * reduction / 100), int(df["is_canceled"].sum()))
+    completed_avg_value = df.loc[df["is_canceled"].eq(0), "booking_value"].mean()
+    completed_avg_value = 0 if pd.isna(completed_avg_value) else completed_avg_value
+    recovered = rescued * completed_avg_value * (1 + adr_change / 100)
+    projected = revenue * (1 + adr_change / 100) + recovered
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Bookings rescued", f"{rescued:,.0f}")
+    s2.metric("Revenue recovered", f"€{recovered:,.0f}")
+    s3.metric("Scenario revenue", f"€{projected/1_000_000:.2f}M")
+    st.caption("Directional scenario—not a causal forecast. It converts an operating target into financial stakes.")
+
+highest_segment = segment_summary.sort_values(["Cancellation_rate", "Bookings"], ascending=False).iloc[0]
+highest_hotel = hotel_summary.sort_values("Cancellation_rate", ascending=False).iloc[0]
+highest_lead = lead_summary.sort_values("Cancellation_rate", ascending=False).iloc[0]
+
+st.subheader("Action board")
+st.markdown(f"""
+<div class="manager-box"><b>1. Prioritise {highest_segment['market_segment']} bookings.</b>
+This segment shows a {highest_segment['Cancellation_rate']:.1%} cancellation rate in the selected view. Test timed reminders and a risk-based deposit rule.</div>
+<div class="manager-box"><b>2. Focus operational ownership on {highest_hotel['hotel']}.</b>
+Its cancellation rate is {highest_hotel['Cancellation_rate']:.1%}. Review channel mix weekly and assign a named revenue manager to the gap.</div>
+<div class="manager-box"><b>3. Intervene in the {highest_lead['lead_time_band']} window.</b>
+This lead-time band has the highest observed cancellation rate ({highest_lead['Cancellation_rate']:.1%}). Reconfirm intent before the free-cancellation deadline.</div>
+""", unsafe_allow_html=True)
+
+with st.expander("Method, assumptions and limitations"):
+    st.markdown("""
+- Source: Kaggle Hotel Booking Demand; anonymised City and Resort hotel bookings.
+- Missing children are set to zero; country, agent and company use an Unknown label.
+- Records with no guests, invalid dates or negative ADR are excluded; duplicates are retained.
+- Realised room revenue is estimated as ADR × booked nights for non-cancelled bookings.
+- The data covers two Portuguese hotels (2015–2017), so findings are not automatically causal or universal.
+- No room inventory or operating cost is provided; occupancy, profit and RevPAR cannot be claimed reliably.
+""")
+
+st.download_button("Download filtered management extract", df.to_csv(index=False).encode("utf-8"),
+                   "filtered_hotel_bookings.csv", "text/csv")
+st.markdown('<p class="small-note">Prepared as an educational management dashboard. Explain every assumption during Q&A.</p>', unsafe_allow_html=True)
