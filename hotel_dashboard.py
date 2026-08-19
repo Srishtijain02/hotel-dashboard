@@ -246,26 +246,7 @@ highest_segment = segment_summary.sort_values(["Cancellation_rate", "Bookings"],
 highest_hotel = hotel_summary.sort_values("Cancellation_rate", ascending=False).iloc[0]
 highest_lead = lead_summary.sort_values("Cancellation_rate", ascending=False).iloc[0]
 
-st.subheader("Action board")
-st.markdown(f"""
-<div class="manager-box"><b>1. Prioritise {highest_segment['market_segment']} bookings.</b>
-This segment shows a {highest_segment['Cancellation_rate']:.1%} cancellation rate in the selected view. Test timed reminders and a risk-based deposit rule.</div>
-<div class="manager-box"><b>2. Focus operational ownership on {highest_hotel['hotel']}.</b>
-Its cancellation rate is {highest_hotel['Cancellation_rate']:.1%}. Review channel mix weekly and assign a named revenue manager to the gap.</div>
-<div class="manager-box"><b>3. Intervene in the {highest_lead['lead_time_band']} window.</b>
-This lead-time band has the highest observed cancellation rate ({highest_lead['Cancellation_rate']:.1%}). Reconfirm intent before the free-cancellation deadline.</div>
-""", unsafe_allow_html=True)
 
-with st.expander("Method, assumptions and limitations"):
-    st.markdown("""
-- Source: Kaggle Hotel Booking Demand; anonymised City and Resort hotel bookings.
-- Missing children are set to zero; country, agent and company use an Unknown label.
-- Records with no guests, invalid dates or negative ADR are excluded; duplicates are retained.
-- Realised room revenue is estimated as ADR × booked nights for non-cancelled bookings.
-- The data covers two Portuguese hotels (2015–2017), so findings are not automatically causal or universal.
-- No room inventory or operating cost is provided; occupancy, profit and RevPAR cannot be claimed reliably.
-""")
 
 st.download_button("Download filtered management extract", df.to_csv(index=False).encode("utf-8"),
                    "filtered_hotel_bookings.csv", "text/csv")
-st.markdown('<p class="small-note">Prepared as an educational management dashboard. Explain every assumption during Q&A.</p>', unsafe_allow_html=True)
